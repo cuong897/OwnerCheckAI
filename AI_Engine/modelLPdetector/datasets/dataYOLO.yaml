@@ -1,0 +1,7 @@
+path: 'C:/Users/ADMIN/Documents/GitHub/UET_AIT3004-2_OwnercheckAI/AI_Engine/modelLPdetector/datasets'
+
+train: train/images
+val: valid/images
+
+nc: 1
+names: ['license_plate']

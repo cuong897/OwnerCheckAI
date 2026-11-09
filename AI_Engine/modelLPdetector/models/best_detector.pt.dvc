@@ -1,0 +1,5 @@
+outs:
+- md5: cf861836f98a7f9518299ae8c76bc003
+  size: 52029963
+  hash: md5
+  path: best_detector.pt

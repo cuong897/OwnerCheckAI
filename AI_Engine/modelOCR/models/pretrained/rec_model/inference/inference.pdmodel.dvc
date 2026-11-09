@@ -1,0 +1,5 @@
+outs:
+- md5: b7fc6c910e4cd656c26198dcb1456d7f
+  size: 2517366
+  hash: md5
+  path: inference.pdmodel

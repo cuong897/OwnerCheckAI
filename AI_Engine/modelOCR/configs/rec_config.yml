@@ -1,0 +1,147 @@
+Global:
+  # ── Đường dẫn ────────────────────────────────────────────────────────────────
+  pretrained_model: ../models/pretrained/rec_model/best_accuracy
+  save_model_dir:   ../models/finetuned/rec_model/
+
+  # ── File từ điển ký tự ───────────────────────────────────────────────────────
+  character_dict_path: ../models/latin_dict.txt
+  use_space_char: false
+
+  # ── Cấu hình chung ───────────────────────────────────────────────────────────
+  max_text_length: 12
+  infer_img: ../datasets/valid/images
+
+  use_gpu: true
+  epoch_num: 50
+  log_smooth_window: 20
+  print_batch_step: 10
+  save_epoch_step: 5
+  early_stopping_epoch: 10
+
+  eval_batch_step: [0, 200]
+  cal_metric_during_train: true
+  metric_during_train: true
+  save_res_path: ../runs/rec_predict_results.txt
+
+# ── Kiến trúc PP-OCRv4 rec ───────────────────────────────────────────────────
+# v4: MultiHead (CTC + SAR), Backbone giữ MobileNetV1Enhance nhưng scale khác
+Architecture:
+  model_type: rec
+  algorithm: SVTR_LCNet
+  Transform:
+  Backbone:
+    name: MobileNetV1Enhance
+    scale: 0.5
+    last_conv_stride: [1, 2]
+    last_pool_type: avg
+    last_pool_kernel_size: [2, 4]
+  Neck:
+    name: SequenceEncoder
+    encoder_type: svtr
+    dims: 64
+    depth: 2
+    hidden_dims: 120
+    use_guide: true             # v4 vẫn giữ use_guide
+  Head:
+    name: MultiHead             # ← v4: thay CTCHead bằng MultiHead
+    head_list:
+      - CTCHead:
+          Neck:
+            name: svtr
+            dims: 64
+            depth: 2
+            hidden_dims: 120
+            kernel_size: [1, 3]
+            use_guide: true
+          Head:
+            fc_decay: 0.00001
+      - SARHead:                # ← v4: thêm SARHead cho MultiLoss
+          enc_dim: 512
+          max_text_length: 12
+
+# ── Loss: v4 dùng MultiLoss (CTC + SAR) ──────────────────────────────────────
+Loss:
+  name: MultiLoss               # ← v4: thay CTCLoss
+  loss_config_list:
+    - CTCLoss:
+    - SARLoss:
+
+Optimizer:
+  name: Adam
+  beta1: 0.9
+  beta2: 0.999
+  lr:
+    name: Cosine
+    learning_rate: 0.0005
+    warmup_epoch: 5
+  regularizer:
+    name: L2
+    factor: 0.00001
+
+PostProcess:
+  name: CTCLabelDecode
+
+Metric:
+  name: RecMetric
+  main_indicator: acc
+
+Train:
+  dataset:
+    name: SimpleDataSet
+    data_dir: ../datasets/train/images/
+    label_file_list:
+      - ../datasets/train/labels.txt
+    transforms:
+      - DecodeImage:
+          img_mode: BGR
+          channel_first: false
+      - RecAug:
+      - MultiLabelEncode:       # ← v4: thay CTCLabelEncode
+          max_text_length: 12
+          character_dict_path: ../models/latin_dict.txt
+          use_space_char: false
+      - SVTRRecResizeImg:
+          image_shape: [3, 48, 320]
+          padding: true
+      - KeepKeys:
+          keep_keys:            # ← v4: thêm label_gtc và valid_ratio
+            - image
+            - label_ctc
+            - label_gtc
+            - length
+            - valid_ratio
+  loader:
+    shuffle: true
+    batch_size_per_card: 64    # Giảm xuống 32 nếu OOM
+    drop_last: true
+    num_workers: 4
+
+Eval:
+  dataset:
+    name: SimpleDataSet
+    data_dir: ../datasets/valid/images/
+    label_file_list:
+      - ../datasets/valid/labels.txt
+    transforms:
+      - DecodeImage:
+          img_mode: BGR
+          channel_first: false
+      - MultiLabelEncode:       # ← v4
+          max_text_length: 12
+          character_dict_path: ../models/latin_dict.txt
+          use_space_char: false
+      - SVTRRecResizeImg:
+          image_shape: [3, 48, 320]
+          padding: true
+      - KeepKeys:
+          keep_keys:            # ← v4
+            - image
+            - label_ctc
+            - label_gtc
+            - length
+            - valid_ratio
+  loader:
+    shuffle: false
+    drop_last: false
+    batch_size_per_card: 64
+    num_workers: 4

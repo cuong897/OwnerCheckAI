@@ -1,0 +1,25 @@
+# AI_Engine V2 — YOLO detector + PaddleOCR recognition (CPU only).
+# Image worker ~5GB sau khi build. Lần đầu build ~15 phút.
+# Có GPU NVIDIA: xoá --extra-index-url, đổi paddlepaddle→paddlepaddle-gpu,
+# torch CUDA wheel, set AI_USE_GPU=1 trong .env.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.0
+torchvision==0.18.0
+
+ultralytics==8.3.0
+
+# headless = không kéo GUI libs; ultralytics dùng được headless OK.
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+
+# PaddleOCR + dependencies
+# paddlepaddle conflict urllib3>=2 → pin <2.0 (minio 7.2.10 vẫn tương thích)
+paddleocr==2.7.3
+paddlepaddle==2.6.2
+urllib3<2.0.0
+
+# Hỗ trợ
+Pillow==10.3.0
+scikit-image==0.22.0
+pyyaml==6.0.1

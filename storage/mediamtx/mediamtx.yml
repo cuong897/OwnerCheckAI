@@ -1,0 +1,79 @@
+###############################################################################
+# MediaMTX config — restream local mp4 → RTSP, loop vô tận
+#
+# Path "traffic": ai cũng publish/read được, loop file /videos/traffic.mp4.
+# URL kết quả (từ trong docker network backend_net):
+#   rtsp://mediamtx:8554/traffic
+# Từ host PC (nếu cần test bằng VLC):
+#   rtsp://localhost:8554/traffic
+###############################################################################
+
+logLevel: info
+logDestinations: [stdout]
+
+# Tắt protocol không dùng, chỉ giữ RTSP để gọn
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+
+rtspAddress: :8554
+
+# Cho phép tất cả publish/read trong nội bộ network (project sinh viên).
+# Production: dùng authInternalUsers / authJWT.
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+      - action: pprof
+
+paths:
+  # Loop video file traffic.mp4 thành luồng RTSP
+  # MediaMTX tự gọi ffmpeg khi có client đầu tiên đọc luồng.
+  traffic:
+    runOnDemand: >
+      ffmpeg -re -stream_loop -1 -i /videos/traffic.mp4
+      -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p
+      -an -f rtsp rtsp://localhost:8554/$MTX_PATH
+    runOnDemandRestart: yes
+    runOnDemandCloseAfter: 10s
+  cam2:
+    runOnDemand: >
+      ffmpeg -re -stream_loop -1 -i /videos/cam2.mp4
+      -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p
+      -an -f rtsp rtsp://localhost:8554/$MTX_PATH
+    runOnDemandRestart: yes
+    runOnDemandCloseAfter: 10s
+  demo:
+    runOnDemand: >
+      ffmpeg -re -stream_loop -1 -i /videos/demo_loop.mp4
+      -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p
+      -an -f rtsp rtsp://localhost:8554/$MTX_PATH
+    runOnDemandRestart: yes
+    runOnDemandCloseAfter: 10s
+  
+  # Dùng cam3_720p.mp4 (pre-encoded 720p H.264) → -c copy, zero CPU.
+  # File gốc cam3.mp4 là 4K HEVC, transcode realtime trên CPU không gánh nổi.
+  cam3:
+    runOnDemand: >
+       ffmpeg -re -stream_loop -1 -i /videos/cam3_720p.mp4
+       -c copy -an -f rtsp rtsp://localhost:8554/$MTX_PATH
+    runOnDemandRestart: yes
+    runOnDemandCloseAfter: 10s
+
+
+  # Thêm path khác bằng cách copy block trên, đổi tên + đổi file.
+  # Ví dụ:
+  # cam3:
+  #   runOnDemand: >
+  #     ffmpeg -re -stream_loop -1 -i /videos/parking.mp4
+  #     -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p
+  #     -an -f rtsp rtsp://localhost:8554/$MTX_PATH
+  #   runOnDemandRestart: yes
+  #   runOnDemandCloseAfter: 10s

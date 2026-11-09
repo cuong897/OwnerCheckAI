@@ -1,0 +1,330 @@
+# ==========================================================================
+# OwnerCheckAI — Main compose (dev + production)
+# Giảng viên chỉ cần `git clone` repo rồi `docker compose up -d` — KHÔNG cần
+# tạo file .env (mọi biến đều có default an toàn cho demo qua ${VAR:-default}).
+#
+# Khi cần override (ví dụ prod đổi password), tạo `.env` cạnh file này;
+# compose tự nạp và override default.
+#
+# Developer rebuild image local: `docker compose build` (cần model weights →
+# xem section 4.3 README cho workflow DVC).
+# ==========================================================================
+
+# ---------- YAML anchors for env defaults ----------
+x-backend-env: &backend_env
+  POSTGRES_USER:        ${POSTGRES_USER:-admin}
+  POSTGRES_PASSWORD:    ${POSTGRES_PASSWORD:-secret}
+  POSTGRES_DB:          ${POSTGRES_DB:-lpr_database}
+  DATABASE_URL:         ${DATABASE_URL:-postgresql+psycopg2://admin:secret@db:5432/lpr_database}
+  SECRET_KEY:           ${SECRET_KEY:-dev-secret-please-replace-with-openssl-rand-hex-32}
+  ALGORITHM:            ${ALGORITHM:-HS256}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+  MINIO_ROOT_USER:      ${MINIO_ROOT_USER:-admin}
+  MINIO_ROOT_PASSWORD:  ${MINIO_ROOT_PASSWORD:-secretpassword}
+  MINIO_ENDPOINT:       ${MINIO_ENDPOINT:-minio:9000}
+  MINIO_ACCESS_KEY:     ${MINIO_ACCESS_KEY:-admin}
+  MINIO_SECRET_KEY:     ${MINIO_SECRET_KEY:-secretpassword}
+  MINIO_BUCKET:         ${MINIO_BUCKET:-plates}
+  MINIO_SECURE:         ${MINIO_SECURE:-false}
+  MINIO_SERVICE_USER:   ${MINIO_SERVICE_USER:-lpr-backend-svc}
+  MINIO_SERVICE_PASSWORD: ${MINIO_SERVICE_PASSWORD:-lpr-backend-svc-pass}
+  QDRANT_HOST:          ${QDRANT_HOST:-qdrant}
+  QDRANT_PORT:          ${QDRANT_PORT:-6333}
+  REDIS_HOST:           ${REDIS_HOST:-redis}
+  REDIS_PORT:           ${REDIS_PORT:-6379}
+  REDIS_DB:             ${REDIS_DB:-0}
+  JOB_STATE_TTL_SECONDS: ${JOB_STATE_TTL_SECONDS:-3600}
+  CAMERA_PREVIEW_FPS:   ${CAMERA_PREVIEW_FPS:-15}
+  CAMERA_AI_FPS:        ${CAMERA_AI_FPS:-5}
+  CAMERA_JPEG_QUALITY:  ${CAMERA_JPEG_QUALITY:-95}
+  AI_DET_CONF:          ${AI_DET_CONF:-0.2}
+  AI_OCR_SCORE:         ${AI_OCR_SCORE:-0.3}
+  AI_SKIP_QUALITY:      ${AI_SKIP_QUALITY:-1}
+  AI_USE_GPU:           ${AI_USE_GPU:-0}
+
+services:
+  nginx:
+    image: nginx:1.26-alpine
+    container_name: lpr_nginx
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./storage/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    networks:
+      - public_net
+      - backend_net
+    logging: &default_logging
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # FRONTEND — React SPA, built static, served by nginx-alpine
+  # image: dùng cho deploy (giảng viên auto-pull từ Docker Hub).
+  # build: cho dev — `docker compose build frontend` để rebuild local.
+  frontend:
+    image: dddddd112233/lpr-frontend:1.0
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: lpr_frontend
+    restart: always
+    networks:
+      - backend_net
+    logging: *default_logging
+
+  backend:
+    image: dddddd112233/lpr-backend:1.0
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: lpr_backend
+    restart: always
+    environment: *backend_env
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    logging: *default_logging
+
+  # MEDIAMTX — Restream video local mp4 → RTSP. Dùng để mô phỏng camera RTSP
+  # khi không có thiết bị thật. Đặt video vào ./storage/test_videos/<name>.mp4
+  # rồi config path tương ứng trong storage/mediamtx/mediamtx.yml.
+  #
+  # URL trong network backend_net:  rtsp://mediamtx:8554/<path>
+  # URL từ host (VLC test):         rtsp://localhost:8554/<path>
+  mediamtx:
+    image: bluenviron/mediamtx:latest-ffmpeg
+    container_name: lpr_mediamtx
+    restart: always
+    ports:
+      - "127.0.0.1:8554:8554"
+    volumes:
+      - ./storage/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+      - ./storage/test_videos:/videos:ro
+    networks:
+      - backend_net
+    logging: *default_logging
+
+  # QDRANT — Vector store cho plate embeddings 512d
+  qdrant:
+    image: qdrant/qdrant:v1.11.0
+    container_name: lpr_qdrant
+    restart: always
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - backend_net
+    logging: *default_logging
+
+  # STREAM INGESTOR — Đọc RTSP từ các camera ACTIVE, publish frames cho MJPEG
+  # preview + đẩy subset frame vào AI queue.
+  stream-ingestor:
+    image: dddddd112233/lpr-backend:1.0
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: lpr_stream_ingestor
+    restart: always
+    environment:
+      <<: *backend_env
+      # RTSP/TCP để tránh UDP packet loss; nobuffer + low_delay + max_delay nhỏ
+      # để FFmpeg không tích lag khi reader chậm hơn publisher (đặc biệt HEVC).
+      OPENCV_FFMPEG_CAPTURE_OPTIONS: "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000"
+    command: ["python", "-m", "app.stream_ingestor.main"]
+    # Healthcheck từ Dockerfile gọi HTTP localhost:8000 — vô nghĩa vì service
+    # này không chạy uvicorn. Override bằng Redis ping (dependency cốt lõi).
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,redis; redis.Redis(host=os.environ['REDIS_HOST'],port=int(os.environ['REDIS_PORT'])).ping()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_net
+    logging: *default_logging
+
+  # WORKER — Xử lý AI/OCR async (tách khỏi web server)
+  # Đọc job từ Redis Stream `recognition:queue`, gọi LPRPipeline, ghi DB + Qdrant.
+  worker:
+    image: dddddd112233/lpr-backend:1.0
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: lpr_worker
+    restart: always
+    environment: *backend_env
+    command: ["python", "-m", "app.worker.main"]
+    # Tương tự stream-ingestor — override HTTP healthcheck từ Dockerfile.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,redis; redis.Redis(host=os.environ['REDIS_HOST'],port=int(os.environ['REDIS_PORT'])).ping()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - backend_net
+    logging: *default_logging
+    deploy:
+      replicas: 1
+
+  db:
+    image: pgvector/pgvector:pg15
+    container_name: lpr_postgres
+    restart: always
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB:       ${POSTGRES_DB:-lpr_database}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./storage/db/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-lpr_database}"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    logging: *default_logging
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: lpr_redis
+    restart: always
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly no
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging: *default_logging
+
+  minio:
+    image: minio/minio:latest
+    container_name: lpr_minio
+    restart: always
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-secretpassword}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - backend_net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    logging: *default_logging
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: lpr_minio_setup
+    restart: on-failure
+    environment:
+      MINIO_ROOT_USER:        ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD:    ${MINIO_ROOT_PASSWORD:-secretpassword}
+      MINIO_SERVICE_USER:     ${MINIO_SERVICE_USER:-lpr-backend-svc}
+      MINIO_SERVICE_PASSWORD: ${MINIO_SERVICE_PASSWORD:-lpr-backend-svc-pass}
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./storage/minio/setup_buckets.sh:/setup_buckets.sh:ro
+    entrypoint: /bin/sh /setup_buckets.sh
+    networks:
+      - backend_net
+
+  pgadmin:
+    image: dpage/pgadmin4:8.6
+    container_name: lpr_pgadmin
+    restart: always
+    profiles:
+      - tools
+    environment:
+      PGADMIN_DEFAULT_EMAIL:    ${PGADMIN_EMAIL:-admin@lpr.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-changeme}
+    ports:
+      - "127.0.0.1:5050:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend_net
+    logging: *default_logging
+
+
+networks:
+  public_net:
+    driver: bridge
+  backend_net:
+    driver: bridge
+    internal: false
+
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  qdrant_data:

@@ -1,0 +1,85 @@
+# DVC pipeline — định nghĩa các stage tái lập được:
+#
+#   train_detector  → train YOLO biển số (output: best_detector.pt)
+#   eval_detector   → đo mAP trên tập val           (metrics: detector.json)
+#   train_ocr       → fine-tune PaddleOCR rec       (output: finetuned/)
+#   eval_ocr        → đo accuracy chuỗi/ký tự       (metrics: ocr.json)
+#
+# Chạy:
+#   dvc repro                      # rerun stage nào đổi deps/params/code
+#   dvc repro train_detector       # rerun cụ thể 1 stage
+#   dvc metrics show               # so sánh metrics hiện tại
+#   dvc metrics diff               # so với commit trước
+#
+# Lưu ý: dataset (train/valid images + labels) là dep nhưng chưa được commit
+# vào git (xem .gitignore). Thành viên phải `dvc pull` hoặc tự đặt vào đúng
+# đường dẫn trong `params.yaml -> data.*` trước khi `dvc repro`.
+
+stages:
+  train_detector:
+    cmd: python -m AI_Engine.modelLPdetector.src.trainYOLO
+    deps:
+      - AI_Engine/modelLPdetector/src/trainYOLO.py
+      - AI_Engine/modelLPdetector/src/modelYOLO.py
+      - AI_Engine/modelLPdetector/datasets/dataYOLO.yaml
+      - AI_Engine/modelLPdetector/datasets/train
+      - AI_Engine/modelLPdetector/datasets/valid
+      - yolov8m.pt
+    params:
+      - detector.pretrained
+      - detector.data_yaml
+      - detector.run_name
+      - detector.weights_out
+      - detector.train
+    outs:
+      - AI_Engine/modelLPdetector/models/best_detector.pt:
+          cache: true
+          persist: false
+
+  eval_detector:
+    cmd: python -m AI_Engine.modelLPdetector.src.evalYOLO
+    deps:
+      - AI_Engine/modelLPdetector/src/evalYOLO.py
+      - AI_Engine/modelLPdetector/models/best_detector.pt
+      - AI_Engine/modelLPdetector/datasets/dataYOLO.yaml
+      - AI_Engine/modelLPdetector/datasets/valid
+    params:
+      - detector.eval
+      - detector.weights_out
+      - detector.data_yaml
+    metrics:
+      - metrics/detector.json:
+          cache: false
+
+  train_ocr:
+    cmd: python -m AI_Engine.modelOCR.src.trainOCR
+    deps:
+      - AI_Engine/modelOCR/src/trainOCR.py
+      - AI_Engine/modelOCR/src/modelOCR.py
+      - AI_Engine/modelOCR/configs/rec_config.yml
+      - AI_Engine/modelOCR/datasets
+      - AI_Engine/modelOCR/models/pretrained/rec_model
+    params:
+      - ocr.config
+      - ocr.pretrained
+      - ocr.finetuned_dir
+      - ocr.train
+    outs:
+      - AI_Engine/modelOCR/models/finetuned/rec_model:
+          cache: true
+          persist: false
+
+  eval_ocr:
+    cmd: python -m AI_Engine.modelOCR.src.evalOCR
+    deps:
+      - AI_Engine/modelOCR/src/evalOCR.py
+      - AI_Engine/modelOCR/src/modelOCR.py
+      - AI_Engine/modelOCR/models/pretrained/rec_model/inference
+      - AI_Engine/modelOCR/datasets
+    params:
+      - ocr.inference_dir
+      - ocr.eval
+      - ocr.inference
+    metrics:
+      - metrics/ocr.json:
+          cache: false

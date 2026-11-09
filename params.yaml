@@ -1,0 +1,78 @@
+# Hyperparams trung tâm cho data pipeline + model training/eval.
+# Mọi thay đổi ở đây sẽ được DVC tự phát hiện (qua `dvc.yaml`) và
+# trigger rerun đúng stage bị ảnh hưởng — không cần đoán bằng tay.
+
+# ── YOLO detector (LPDetector) ──────────────────────────────────────────────
+detector:
+  # Pretrained backbone (đã được track bằng DVC: yolov8m.pt.dvc)
+  pretrained: yolov8m.pt
+  data_yaml: AI_Engine/modelLPdetector/datasets/dataYOLO.yaml
+  run_name: lp_detector_v1
+  output_dir: AI_Engine/modelLPdetector/runs/train
+  weights_out: AI_Engine/modelLPdetector/models/best_detector.pt
+
+  train:
+    epochs: 50
+    imgsz: 640
+    batch: 16
+    workers: 2          # Windows hay treo nếu > 2
+    device: 0           # 0 = first GPU; "cpu" nếu chỉ CPU
+    exist_ok: true      # cho phép DVC rerun overwrite run cũ
+    seed: 42
+
+  eval:
+    conf_threshold: 0.25
+    iou_threshold: 0.6
+    imgsz: 640
+    split: val          # tập eval (val|test)
+
+  inference:
+    # Ngưỡng dùng ở pipeline production (worker.LPRPipeline)
+    conf_threshold: 0.5
+
+# ── PaddleOCR (Recognition) ─────────────────────────────────────────────────
+ocr:
+  # Config training file (đã có sẵn, được DVC stage xem như dep)
+  config: AI_Engine/modelOCR/configs/rec_config.yml
+  paddleocr_dir: AI_Engine/modelOCR/PaddleOCR     # clone của PaddleOCR repo
+  pretrained: AI_Engine/modelOCR/models/pretrained/rec_model/best_accuracy
+  finetuned_dir: AI_Engine/modelOCR/models/finetuned/rec_model
+  inference_dir: AI_Engine/modelOCR/models/pretrained/rec_model/inference
+  dict_path: AI_Engine/modelOCR/models/latin_dict.txt
+
+  train:
+    # Các tham số dưới đây sẽ override config YAML khi chạy (qua flag -o của PaddleOCR)
+    epoch_num: 50
+    batch_size: 64
+    learning_rate: 0.0005
+    warmup_epoch: 5
+    max_text_length: 12
+
+  eval:
+    score_threshold: 0.7
+    # Tập eval — PaddleOCR đọc trực tiếp từ Eval.dataset trong rec_config.yml
+
+  inference:
+    score_threshold: 0.7
+    use_gpu: true
+
+# ── Pipeline (E2E inference dùng trong worker) ──────────────────────────────
+pipeline:
+  det_conf: 0.5
+  ocr_score: 0.7
+  use_gpu: true
+  # Preprocess
+  crop_padding_ratio: 0.05
+  deskew_target_width: 470
+  deskew_target_height: 110
+
+# ── Data versioning ─────────────────────────────────────────────────────────
+data:
+  detector_dataset: AI_Engine/modelLPdetector/datasets
+  ocr_dataset: AI_Engine/modelOCR/datasets
+
+# ── Embedder (ResNet18 → 512d, dùng cho Qdrant similarity search) ───────────
+embedder:
+  backbone: resnet18
+  dim: 512
+  normalize: l2          # cosine similarity yêu cầu L2-norm
